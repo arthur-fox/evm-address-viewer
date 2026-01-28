@@ -1,7 +1,9 @@
-import { useState } from 'react';
-import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/react-query';
+import { useState, useRef, useCallback } from 'react';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AddressInput } from './components/AddressInput';
 import { AccountCard } from './components/AccountCard';
+import type { AccountCardRef } from './components/AccountCard';
+import { preloadNativeTokenPrices } from './services/coingecko';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -13,7 +15,8 @@ const queryClient = new QueryClient({
 
 function AppContent() {
   const [addresses, setAddresses] = useState<string[]>([]);
-  const queryClient = useQueryClient();
+  const [isLoadingAll, setIsLoadingAll] = useState(false);
+  const cardRefs = useRef<Map<string, AccountCardRef>>(new Map());
 
   const handleAddAddress = (address: string) => {
     setAddresses((prev) => [...prev, address]);
@@ -25,10 +28,32 @@ function AppContent() {
 
   const handleRemoveAddress = (address: string) => {
     setAddresses((prev) => prev.filter((a) => a.toLowerCase() !== address.toLowerCase()));
+    cardRefs.current.delete(address.toLowerCase());
   };
 
-  const handleLoadAll = () => {
-    queryClient.refetchQueries({ queryKey: ['accountTokens'] });
+  const setCardRef = useCallback((address: string, ref: AccountCardRef | null) => {
+    if (ref) {
+      cardRefs.current.set(address.toLowerCase(), ref);
+    } else {
+      cardRefs.current.delete(address.toLowerCase());
+    }
+  }, []);
+
+  const handleLoadAll = async () => {
+    setIsLoadingAll(true);
+    try {
+      // Preload native token prices first (single API call for all)
+      await preloadNativeTokenPrices();
+
+      // Then trigger refetch on all cards
+      const refetchPromises: Promise<void>[] = [];
+      cardRefs.current.forEach((ref) => {
+        refetchPromises.push(ref.refetchAll());
+      });
+      await Promise.all(refetchPromises);
+    } finally {
+      setIsLoadingAll(false);
+    }
   };
 
   return (
@@ -61,9 +86,17 @@ function AppContent() {
               <span className="text-gray-400 text-sm">{addresses.length} address{addresses.length !== 1 ? 'es' : ''}</span>
               <button
                 onClick={handleLoadAll}
-                className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition-colors"
+                disabled={isLoadingAll}
+                className={`px-3 py-1.5 text-white text-sm font-medium rounded-lg transition-colors flex items-center gap-2 ${
+                  isLoadingAll
+                    ? 'bg-blue-800 cursor-not-allowed'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
               >
-                Load All
+                {isLoadingAll && (
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                )}
+                {isLoadingAll ? 'Loading...' : 'Load All'}
               </button>
             </div>
             <div className="space-y-3">
@@ -72,6 +105,7 @@ function AppContent() {
                   key={address}
                   address={address}
                   onRemove={() => handleRemoveAddress(address)}
+                  ref={(ref) => setCardRef(address, ref)}
                 />
               ))}
             </div>

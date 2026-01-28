@@ -10,6 +10,9 @@ const CACHE_TTL = 5 * 60 * 1000; // 5 minutes (longer to reduce rate limiting)
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Request deduplication - prevents multiple in-flight requests for the same data
+const pendingRequests = new Map<string, Promise<number | null>>();
+
 export const getTokenPrices = async (
   tokenAddresses: string[],
   platform: string
@@ -84,14 +87,9 @@ export const getTokenPrices = async (
 // Cache for native token prices
 const nativePriceCache = new Map<string, { price: number; timestamp: number }>();
 
-export const getNativeTokenPrice = async (coinId: string): Promise<number | null> => {
-  if (!coinId) return null;
-
-  // Check cache first
+// Fetch native token price with request deduplication
+const fetchNativePrice = async (coinId: string): Promise<number | null> => {
   const cached = nativePriceCache.get(coinId);
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    return cached.price;
-  }
 
   try {
     const response = await fetch(
@@ -117,6 +115,64 @@ export const getNativeTokenPrice = async (coinId: string): Promise<number | null
     return price;
   } catch {
     return cached?.price ?? null;
+  }
+};
+
+export const getNativeTokenPrice = async (coinId: string): Promise<number | null> => {
+  if (!coinId) return null;
+
+  // Check cache first
+  const cached = nativePriceCache.get(coinId);
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    return cached.price;
+  }
+
+  // Check if there's already a pending request for this coinId
+  const pendingKey = `native:${coinId}`;
+  const pending = pendingRequests.get(pendingKey);
+  if (pending) {
+    return pending;
+  }
+
+  // Create new request and store it for deduplication
+  const request = fetchNativePrice(coinId).finally(() => {
+    pendingRequests.delete(pendingKey);
+  });
+
+  pendingRequests.set(pendingKey, request);
+  return request;
+};
+
+// Batch fetch all native token prices at once (more efficient)
+export const preloadNativeTokenPrices = async (): Promise<void> => {
+  const uniqueCoinIds = [...new Set(Object.values(NATIVE_TOKEN_IDS))];
+
+  // Check which ones need fetching
+  const toFetch = uniqueCoinIds.filter((coinId) => {
+    const cached = nativePriceCache.get(coinId);
+    return !cached || Date.now() - cached.timestamp >= CACHE_TTL;
+  });
+
+  if (toFetch.length === 0) return;
+
+  try {
+    const response = await fetch(
+      `${COINGECKO_API_BASE}/simple/price?ids=${toFetch.join(',')}&vs_currencies=usd`
+    );
+
+    if (!response.ok) return;
+
+    const data = await response.json();
+    const now = Date.now();
+
+    for (const coinId of toFetch) {
+      const price = data[coinId]?.usd;
+      if (price !== undefined) {
+        nativePriceCache.set(coinId, { price, timestamp: now });
+      }
+    }
+  } catch (error) {
+    console.warn('Failed to preload native token prices:', error);
   }
 };
 

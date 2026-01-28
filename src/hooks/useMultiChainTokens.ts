@@ -1,6 +1,6 @@
 import { useQueries } from '@tanstack/react-query';
 import { getTokenBalances, getNativeBalance } from '../services/alchemy';
-import { getTokenPrices, getNativeTokenPrice, NATIVE_TOKEN_IDS } from '../services/coingecko';
+import { getTokenPrices, getNativeTokenPrice, NATIVE_TOKEN_IDS, preloadNativeTokenPrices } from '../services/coingecko';
 import { SUPPORTED_CHAINS } from '../utils/chains';
 import type { Chain, Token } from '../types';
 
@@ -80,6 +80,7 @@ export interface MultiChainResult {
   totalNetWorth: number;
   chainBreakdown: ChainNetWorth[];
   isLoading: boolean;
+  isFetched: boolean;
   refetchAll: () => void;
 }
 
@@ -90,7 +91,8 @@ export const useMultiChainTokens = (address: string): MultiChainResult => {
       queryFn: () => fetchChainTokens(address, chain),
       staleTime: 60 * 1000,
       retry: 2,
-      enabled: !!address && address.length === 42,
+      // DISABLED by default - only fetch when explicitly triggered via refetch()
+      enabled: false,
     })),
   });
 
@@ -107,9 +109,12 @@ export const useMultiChainTokens = (address: string): MultiChainResult => {
   });
 
   const totalNetWorth = chainBreakdown.reduce((sum, chain) => sum + chain.netWorth, 0);
-  const isLoading = queries.some((q) => q.isLoading);
+  const isLoading = queries.some((q) => q.isLoading || q.isFetching);
+  const isFetched = queries.some((q) => q.isFetched);
 
-  const refetchAll = () => {
+  const refetchAll = async () => {
+    // Preload native prices first, then fetch all chains
+    await preloadNativeTokenPrices();
     queries.forEach((q) => q.refetch());
   };
 
@@ -117,6 +122,7 @@ export const useMultiChainTokens = (address: string): MultiChainResult => {
     totalNetWorth,
     chainBreakdown,
     isLoading,
+    isFetched,
     refetchAll,
   };
 };
