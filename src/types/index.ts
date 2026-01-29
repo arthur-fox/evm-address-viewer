@@ -22,3 +22,13 @@ export interface AddressEntry {
   address: string;
   label?: string;
 }
+
+export interface ExportData {
+  version: number;
+  exportedAt: string;
+  addresses: string[];
+  cache: Record<string, {
+    totalNetWorth: number;
+    chainBreakdown: ChainBalance[];
+  }>;
+}
