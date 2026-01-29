@@ -1,7 +1,6 @@
-import type { Network } from 'alchemy-sdk';
-
 export interface Token {
   address: string;
+  chain: string;        // DeBank chain ID (eth, arb, op, etc.)
   symbol: string;
   name: string;
   decimals: number;
@@ -12,22 +11,11 @@ export interface Token {
   logoUrl?: string;
 }
 
-export interface AccountTokens {
-  address: string;
+export interface ChainBalance {
   chainId: string;
-  tokens: Token[];
+  chainName: string;
   netWorth: number;
-  isLoading: boolean;
-  error: string | null;
-}
-
-export interface Chain {
-  id: string;
-  name: string;
-  alchemyNetwork: Network;
-  coingeckoPlatform: string;
-  nativeSymbol: string;
-  explorerUrl: string;
+  tokens: Token[];
 }
 
 export interface AddressEntry {

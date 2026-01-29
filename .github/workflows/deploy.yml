@@ -26,7 +26,7 @@ jobs:
       - run: npm ci
       - run: npm run build
         env:
-          VITE_ALCHEMY_API_KEY: ${{ secrets.VITE_ALCHEMY_API_KEY }}
+          VITE_DEBANK_API_KEY: ${{ secrets.VITE_DEBANK_API_KEY }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

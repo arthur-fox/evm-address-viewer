@@ -1,128 +1,106 @@
-import { useQueries } from '@tanstack/react-query';
-import { getTokenBalances, getNativeBalance } from '../services/alchemy';
-import { getTokenPrices, getNativeTokenPrice, NATIVE_TOKEN_IDS, preloadNativeTokenPrices } from '../services/coingecko';
-import { SUPPORTED_CHAINS } from '../utils/chains';
-import type { Chain, Token } from '../types';
+import { useQuery } from '@tanstack/react-query';
+import { getUserTotalBalance, getUserTokenList, DEBANK_CHAIN_NAMES } from '../services/debank';
+import type { DeBankToken } from '../services/debank';
+import type { Token, ChainBalance } from '../types';
 
 const MIN_VALUE_THRESHOLD = 0.01;
 
-const fetchChainTokens = async (
-  address: string,
-  chain: Chain
-): Promise<{ tokens: Token[]; netWorth: number }> => {
-  const [tokenBalances, nativeBalance] = await Promise.all([
-    getTokenBalances(address, chain),
-    getNativeBalance(address, chain),
-  ]);
+// Convert DeBank token to our Token interface
+const mapDeBankToken = (token: DeBankToken): Token => ({
+  address: token.id,
+  chain: token.chain,
+  symbol: token.symbol,
+  name: token.name,
+  decimals: token.decimals,
+  balance: token.amount.toString(),
+  balanceFormatted: token.amount,
+  price: token.price,
+  value: token.amount * token.price,
+  logoUrl: token.logo_url,
+});
 
-  const tokenAddresses = tokenBalances.map((t) => t.address.toLowerCase());
+// Group tokens by chain and calculate per-chain net worth
+const groupTokensByChain = (tokens: Token[]): ChainBalance[] => {
+  const chainMap = new Map<string, Token[]>();
 
-  const [tokenPrices, nativePrice] = await Promise.all([
-    tokenAddresses.length > 0
-      ? getTokenPrices(tokenAddresses, chain.coingeckoPlatform)
-      : ({} as Record<string, number>),
-    getNativeTokenPrice(NATIVE_TOKEN_IDS[chain.id]),
-  ]);
-
-  const tokens: Token[] = [];
-
-  if (nativeBalance > 0 && nativePrice) {
-    const nativeValue = nativeBalance * nativePrice;
-    if (nativeValue >= MIN_VALUE_THRESHOLD) {
-      tokens.push({
-        address: '0x0000000000000000000000000000000000000000',
-        symbol: chain.nativeSymbol,
-        name: chain.nativeSymbol,
-        decimals: 18,
-        balance: (nativeBalance * 1e18).toString(),
-        balanceFormatted: nativeBalance,
-        price: nativePrice,
-        value: nativeValue,
-      });
+  for (const token of tokens) {
+    if (!chainMap.has(token.chain)) {
+      chainMap.set(token.chain, []);
     }
+    chainMap.get(token.chain)!.push(token);
   }
 
-  for (const tokenBalance of tokenBalances) {
-    const price = tokenPrices[tokenBalance.address.toLowerCase()] ?? null;
-    const value = price !== null ? tokenBalance.balanceFormatted * price : null;
+  const chainBalances: ChainBalance[] = [];
 
-    if (value !== null && value >= MIN_VALUE_THRESHOLD) {
-      tokens.push({
-        address: tokenBalance.address,
-        symbol: tokenBalance.symbol,
-        name: tokenBalance.name,
-        decimals: tokenBalance.decimals,
-        balance: tokenBalance.balance,
-        balanceFormatted: tokenBalance.balanceFormatted,
-        price,
-        value,
-        logoUrl: tokenBalance.logoUrl,
-      });
-    }
+  for (const [chainId, chainTokens] of chainMap) {
+    // Sort tokens by value descending
+    chainTokens.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
+
+    const netWorth = chainTokens.reduce((sum, t) => sum + (t.value ?? 0), 0);
+
+    chainBalances.push({
+      chainId,
+      chainName: DEBANK_CHAIN_NAMES[chainId] || chainId,
+      netWorth,
+      tokens: chainTokens,
+    });
   }
 
-  tokens.sort((a, b) => (b.value ?? 0) - (a.value ?? 0));
-  const netWorth = tokens.reduce((sum, token) => sum + (token.value ?? 0), 0);
+  // Sort chains by net worth descending
+  chainBalances.sort((a, b) => b.netWorth - a.netWorth);
 
-  return { tokens, netWorth };
+  return chainBalances;
 };
-
-export interface ChainNetWorth {
-  chainId: string;
-  chainName: string;
-  netWorth: number;
-  tokens: Token[];
-  isLoading: boolean;
-  isError: boolean;
-}
 
 export interface MultiChainResult {
   totalNetWorth: number;
-  chainBreakdown: ChainNetWorth[];
+  chainBreakdown: ChainBalance[];
   isLoading: boolean;
   isFetched: boolean;
-  refetchAll: () => void;
+  isError: boolean;
+  error: Error | null;
+  refetchAll: () => Promise<void>;
 }
 
 export const useMultiChainTokens = (address: string): MultiChainResult => {
-  const queries = useQueries({
-    queries: SUPPORTED_CHAINS.map((chain) => ({
-      queryKey: ['accountTokens', address, chain.id],
-      queryFn: () => fetchChainTokens(address, chain),
-      staleTime: 60 * 1000,
-      retry: 2,
-      // DISABLED by default - only fetch when explicitly triggered via refetch()
-      enabled: false,
-    })),
-  });
+  const query = useQuery({
+    queryKey: ['accountTokens', address],
+    queryFn: async () => {
+      const [totalBalance, tokenList] = await Promise.all([
+        getUserTotalBalance(address),
+        getUserTokenList(address),
+      ]);
 
-  const chainBreakdown: ChainNetWorth[] = SUPPORTED_CHAINS.map((chain, index) => {
-    const query = queries[index];
-    return {
-      chainId: chain.id,
-      chainName: chain.name,
-      netWorth: query.data?.netWorth ?? 0,
-      tokens: query.data?.tokens ?? [],
-      isLoading: query.isLoading,
-      isError: query.isError,
-    };
-  });
+      // Filter and map tokens
+      const tokens = tokenList
+        .map(mapDeBankToken)
+        .filter((t) => t.value !== null && t.value >= MIN_VALUE_THRESHOLD);
 
-  const totalNetWorth = chainBreakdown.reduce((sum, chain) => sum + chain.netWorth, 0);
-  const isLoading = queries.some((q) => q.isLoading || q.isFetching);
-  const isFetched = queries.some((q) => q.isFetched);
+      // Group by chain
+      const chainBreakdown = groupTokensByChain(tokens);
+
+      return {
+        totalNetWorth: totalBalance.total_usd_value,
+        chainBreakdown,
+      };
+    },
+    staleTime: 60 * 1000,
+    retry: 2,
+    // Disabled by default - only fetch when explicitly triggered
+    enabled: false,
+  });
 
   const refetchAll = async () => {
-    // Preload native prices first, then fetch all chains
-    await preloadNativeTokenPrices();
-    queries.forEach((q) => q.refetch());
+    await query.refetch();
   };
 
   return {
-    totalNetWorth,
-    chainBreakdown,
-    isLoading,
-    isFetched,
+    totalNetWorth: query.data?.totalNetWorth ?? 0,
+    chainBreakdown: query.data?.chainBreakdown ?? [],
+    isLoading: query.isLoading || query.isFetching,
+    isFetched: query.isFetched,
+    isError: query.isError,
+    error: query.error,
     refetchAll,
   };
 };
