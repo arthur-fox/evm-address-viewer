@@ -3,7 +3,8 @@ import { QueryClient, QueryClientProvider, useQueryClient } from '@tanstack/reac
 import { AddressInput } from './components/AddressInput';
 import { AccountCard } from './components/AccountCard';
 import type { AccountCardRef } from './components/AccountCard';
-import type { ExportData } from './types';
+import { DEBANK_CHAIN_NAMES } from './services/debank';
+import type { ChainBalance } from './types';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -129,34 +130,52 @@ function AppContent() {
     }
   };
 
-  // Export data to JSON file
+  // Export data to CSV file
   const handleExport = () => {
-    const exportData: ExportData = {
-      version: 1,
-      exportedAt: new Date().toISOString(),
-      addresses,
-      cache: {},
-    };
+    const chainIds = Object.keys(DEBANK_CHAIN_NAMES);
 
-    // Get cached data for each address from React Query
-    addresses.forEach((address) => {
-      const data = queryClient.getQueryData(['accountTokens', address]) as ExportData['cache'][string] | undefined;
-      if (data) {
-        exportData.cache[address.toLowerCase()] = data;
+    // Build header row
+    const headers = ['address', 'totalNetWorth', ...chainIds];
+
+    // Build data rows
+    const rows = addresses.map((address) => {
+      const data = queryClient.getQueryData(['accountTokens', address]) as {
+        totalNetWorth: number;
+        chainBreakdown: ChainBalance[];
+      } | undefined;
+
+      if (!data) {
+        // Address not loaded - export with zeros
+        return [address, '0', ...chainIds.map(() => '0')];
       }
+
+      // Build chain value lookup from chainBreakdown
+      const chainValues: Record<string, number> = {};
+      data.chainBreakdown.forEach((chain) => {
+        chainValues[chain.chainId] = chain.netWorth;
+      });
+
+      return [
+        address,
+        data.totalNetWorth.toString(),
+        ...chainIds.map((id) => (chainValues[id] || 0).toString()),
+      ];
     });
 
-    // Download as JSON file
-    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    // Create CSV content
+    const csv = [headers.join(','), ...rows.map((r) => r.join(','))].join('\n');
+
+    // Download as CSV file
+    const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `evm-addresses-${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `evm-addresses-${new Date().toISOString().split('T')[0]}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   };
 
-  // Import data from JSON file
+  // Import data from CSV file
   const handleImportData = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -164,29 +183,67 @@ function AppContent() {
     const reader = new FileReader();
     reader.onload = (e) => {
       try {
-        const data = JSON.parse(e.target?.result as string) as ExportData;
+        const text = e.target?.result as string;
+        const lines = text.trim().split('\n');
 
-        if (!data.version || !data.addresses || !data.cache) {
-          alert('Invalid export file format');
+        if (lines.length < 2) {
+          alert('Invalid CSV file: no data rows found');
           return;
         }
 
-        // Restore addresses
-        setAddresses(data.addresses);
+        const headers = lines[0].split(',');
 
-        // Restore React Query cache for each address
-        Object.entries(data.cache).forEach(([address, cacheData]) => {
-          queryClient.setQueryData(['accountTokens', address], cacheData);
+        // Validate header structure
+        if (headers[0] !== 'address' || headers[1] !== 'totalNetWorth') {
+          alert('Invalid CSV format: expected address,totalNetWorth,... columns');
+          return;
+        }
+
+        // Chain columns start at index 2
+        const chainStartIdx = 2;
+        const chainIds = headers.slice(chainStartIdx);
+
+        const newAddresses: string[] = [];
+        let loadedCount = 0;
+
+        // Parse each data row
+        lines.slice(1).forEach((line) => {
+          if (!line.trim()) return; // Skip empty lines
+
+          const values = line.split(',');
+          const address = values[0];
+          const totalNetWorth = parseFloat(values[1]) || 0;
+
+          newAddresses.push(address);
+
+          // Only restore cache if there's data (totalNetWorth > 0)
+          if (totalNetWorth > 0) {
+            // Build chainBreakdown from CSV columns
+            const chainBreakdown: ChainBalance[] = chainIds
+              .map((chainId, i) => ({
+                chainId,
+                chainName: DEBANK_CHAIN_NAMES[chainId] || chainId,
+                netWorth: parseFloat(values[chainStartIdx + i]) || 0,
+                tokens: [], // Tokens not stored in CSV - will be empty
+              }))
+              .filter((chain) => chain.netWorth > 0); // Only include chains with value
+
+            // Set React Query cache - use original address case from CSV
+            queryClient.setQueryData(['accountTokens', address], {
+              totalNetWorth,
+              chainBreakdown,
+            });
+
+            // Set netWorthCache for sorting
+            netWorthCache.current.set(address.toLowerCase(), totalNetWorth);
+            loadedCount++;
+          }
         });
 
-        // Update netWorthCache for sorting
-        Object.entries(data.cache).forEach(([address, cacheData]) => {
-          netWorthCache.current.set(address.toLowerCase(), cacheData.totalNetWorth);
-        });
-
-        alert(`Imported ${data.addresses.length} addresses (exported ${new Date(data.exportedAt).toLocaleDateString()})`);
+        setAddresses(newAddresses);
+        alert(`Imported ${newAddresses.length} addresses (${loadedCount} with cached data)`);
       } catch {
-        alert('Failed to parse export file');
+        alert('Failed to parse CSV file');
       }
     };
     reader.readAsText(file);
@@ -226,7 +283,7 @@ function AppContent() {
               Import Data
               <input
                 type="file"
-                accept=".json"
+                accept=".csv"
                 onChange={handleImportData}
                 className="hidden"
               />
@@ -263,7 +320,7 @@ function AppContent() {
                   <input
                     ref={fileInputRef}
                     type="file"
-                    accept=".json"
+                    accept=".csv"
                     onChange={handleImportData}
                     className="hidden"
                   />
